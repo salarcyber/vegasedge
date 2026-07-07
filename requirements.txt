@@ -1,0 +1,25 @@
+# core
+pandas>=2.2
+numpy>=1.26
+httpx>=0.27
+python-dotenv>=1.0
+psycopg[binary]>=3.2
+
+# ML (Module 2)
+scikit-learn>=1.5
+xgboost>=2.1
+joblib>=1.4
+
+# sport data (Module 1/2) — all free
+nba_api>=1.5
+nfl_data_py>=0.3
+pybaseball>=2.2
+beautifulsoup4>=4.12
+lxml>=5.2
+
+# sentiment (Module 7)
+nltk>=3.9
+
+# frontend (Module 8)
+streamlit>=1.38
+plotly>=5.23

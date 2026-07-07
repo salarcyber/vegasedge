@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+artifacts/
+.streamlit/secrets.toml
+nltk_data/

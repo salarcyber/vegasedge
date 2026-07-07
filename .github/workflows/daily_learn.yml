@@ -1,0 +1,40 @@
+name: daily-learn
+# Settle results, grade bets, log P/L + CLV, recalibrate market shrinkage,
+# refresh team metrics, retrain models weekly.
+
+on:
+  schedule:
+    - cron: "30 9 * * *"          # daily 09:30 UTC (after US late games settle)
+  workflow_dispatch: {}
+
+jobs:
+  learn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Refresh advanced team metrics
+        run: python -m src.ingestion.stats_ingest
+      - name: Settle games, grade bets, recalibrate
+        run: python -m src.feedback.settle_and_learn
+      - name: Weekly retrain (Mondays)
+        run: |
+          if [ "$(date -u +%u)" = "1" ]; then
+            for s in nba nfl; do python -m src.models.train $s; done
+          else
+            echo "not Monday, skipping retrain"
+          fi
+      - name: Persist model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: models-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 30
+          if-no-files-found: ignore
