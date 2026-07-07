@@ -9,11 +9,15 @@ DATABASE_URL isn't configured so you can preview the UI instantly:
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root importable
 
 st.set_page_config(page_title="VegasEdge", page_icon="📈", layout="wide")
 
