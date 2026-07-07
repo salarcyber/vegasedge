@@ -149,6 +149,14 @@ def main(sports: list[str]) -> None:
                 print(f"[value] {sport}: no trained model yet — run src.models.train first")
             except Exception as e:
                 print(f"[value] {sport} failed: {e}")
+        # replace, don't append: clear prior prices for the games being repriced
+        # (keeps one live row per event/market/outcome; settled games untouched)
+        event_ids = list({r["event_id"] for r in all_rows})
+        if event_ids:
+            with conn.cursor() as cur:
+                cur.execute("""delete from predictions p using games g
+                               where p.event_id = g.event_id and g.status = 'scheduled'
+                                 and p.event_id = any(%s)""", (event_ids,))
         insert_many(conn, "predictions", all_rows)
 
 
