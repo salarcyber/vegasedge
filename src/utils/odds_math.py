@@ -104,12 +104,16 @@ def evaluate_bet(
     bankroll: float,
     min_ev: float = 0.02,
     kelly_multiplier: float = 0.25,
+    max_ev: float = 0.20,
 ) -> BetEvaluation:
     """The exact value-bet gate: flag only when EV clears `min_ev` (2% default —
-    demanding a margin above zero absorbs model error and beats breakage)."""
+    demanding a margin above zero absorbs model error and beats breakage) and
+    stays under `max_ev` (a 20%+ 'edge' over an efficient market means the
+    model is missing something the market knows — treat as error, not value)."""
     market_prob = devig_power(market_decimals)[0] if market_decimals else implied_prob(best_decimal)
     ev = expected_value(true_prob, best_decimal)
-    kf = kelly_fraction(true_prob, best_decimal, kelly_multiplier) if ev > min_ev else 0.0
+    is_value = min_ev < ev <= max_ev
+    kf = kelly_fraction(true_prob, best_decimal, kelly_multiplier) if is_value else 0.0
     return BetEvaluation(
         true_prob=round(true_prob, 4),
         market_prob=round(market_prob, 4),
@@ -118,7 +122,7 @@ def evaluate_bet(
         edge_pct=round((true_prob - market_prob) * 100, 2),
         kelly_frac=round(kf, 4),
         stake=round(bankroll * kf, 2),
-        is_value=ev > min_ev,
+        is_value=is_value,
     )
 
 

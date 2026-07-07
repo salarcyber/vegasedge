@@ -28,12 +28,20 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       # Seasonal: keep this list to in-season sports to conserve Odds API credits.
-      # Summer: mlb worldcup | Fall/winter: nba nfl nhl epl
-      - name: Ingest live odds (budgeted)
-        run: python -m src.ingestion.odds_ingest mlb worldcup
+      # Summer: mlb worldcup mls | Fall/winter: nba nfl nhl epl ucl laliga
+      # Odds cost credits, so fetch only 3x/day (US betting windows); the rest
+      # of the pipeline below still runs hourly for free.
+      - name: Ingest live odds (budgeted, 3x daily)
+        run: |
+          H=$(date -u +%H)
+          if [ "$H" = "13" ] || [ "$H" = "19" ] || [ "$H" = "23" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python -m src.ingestion.odds_ingest mlb worldcup mls
+          else
+            echo "off-window hour $H UTC — skipping odds fetch to save credits"
+          fi
       - name: Deep-data enrichment (weather, travel, injuries, sentiment)
         run: python -m src.ingestion.deep_data
       - name: Price bets (EV + Kelly)
-        run: python -m src.betting.value_engine mlb worldcup
+        run: python -m src.betting.value_engine mlb worldcup mls
       - name: LLM analyst briefings
         run: python -m src.llm.analyst_agent

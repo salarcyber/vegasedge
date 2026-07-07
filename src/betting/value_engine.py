@@ -20,6 +20,8 @@ from src.utils.db import get_conn, insert_many, query
 from src.utils.odds_math import evaluate_bet, expected_lambdas, match_probs
 
 MIN_EV = 0.02          # demand 2%+ edge; anything less is model noise
+MAX_EV = 0.20          # edges above 20% are almost always model error, not
+                       # market error — flag them as no-bet until proven
 KELLY_MULT = 0.25      # quarter-Kelly
 DEFAULT_BANKROLL = 1000.0
 
@@ -84,7 +86,7 @@ def moneyline_candidates(conn, sport: str, bankroll: float) -> list[dict]:
 
 def poisson_candidates(conn, sport: str, bankroll: float) -> list[dict]:
     """Soccer/NHL: derive 1X2 + totals probabilities from team xG via Poisson."""
-    league_avg = 2.8 if sport.startswith("soccer") else 6.0
+    league_avg = 6.0 if sport == "nhl" else 2.8
     games = query(conn, """
         select g.event_id, g.home_team_id, g.away_team_id, hm.metrics hm, am.metrics am
         from games g
@@ -128,13 +130,16 @@ def poisson_candidates(conn, sport: str, bankroll: float) -> list[dict]:
 
 
 def main(sports: list[str]) -> None:
+    from src.ingestion.odds_ingest import DB_SPORT
+
     with get_conn() as conn:
         bankroll = current_bankroll(conn)
         all_rows: list[dict] = []
         for sport in sports:
+            sport = DB_SPORT.get(sport, sport)
             try:
-                if sport.startswith(("soccer", "epl", "worldcup", "nhl")):
-                    rows = poisson_candidates(conn, "soccer_epl" if sport == "epl" else sport, bankroll)
+                if sport.startswith(("soccer", "worldcup", "nhl")):
+                    rows = poisson_candidates(conn, sport, bankroll)
                 else:
                     rows = moneyline_candidates(conn, sport, bankroll)
                 all_rows.extend(rows)

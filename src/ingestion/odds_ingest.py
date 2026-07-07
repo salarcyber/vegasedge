@@ -27,9 +27,18 @@ SPORTS = {
     "nhl": "icehockey_nhl",
     "epl": "soccer_epl",
     "worldcup": "soccer_fifa_world_cup",
+    "ucl": "soccer_uefa_champs_league",
+    "laliga": "soccer_spain_la_liga",
+    "seriea": "soccer_italy_serie_a",
+    "bundesliga": "soccer_germany_bundesliga",
+    "mls": "soccer_usa_mls",
 }
-MARKETS = "h2h,spreads,totals"
+MARKETS = "h2h,totals"   # 2 credits/sport/pull; add spreads when the engine prices them
 REGIONS = "us"
+
+# CLI name -> sport value stored in the DB (shared with the backfiller)
+DB_SPORT = {"epl": "soccer_epl", "laliga": "soccer_laliga", "seriea": "soccer_seriea",
+            "bundesliga": "soccer_bundesliga", "ucl": "soccer_ucl", "mls": "soccer_mls"}
 
 
 def fetch_odds(sport_key: str, api_key: str) -> list[dict]:
@@ -50,6 +59,7 @@ def fetch_odds(sport_key: str, api_key: str) -> list[dict]:
 
 
 def ingest_sport(conn, sport: str, sport_key: str, api_key: str) -> None:
+    sport = DB_SPORT.get(sport, sport)
     events = fetch_odds(sport_key, api_key)
     horizon = datetime.now(timezone.utc) + timedelta(hours=48)
 

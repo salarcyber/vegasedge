@@ -39,17 +39,17 @@ def line_movement_report(conn, event_id: str, market: str = "h2h") -> list[dict]
             where event_id = %s and market = %s
             group by outcome, captured_at
         ),
-        hourly as (
-            select outcome,
-                   max(abs(prob - lag(prob) over (partition by outcome order by captured_at))) as max_step
-            from series group by outcome, prob, captured_at
+        steps as (
+            select outcome, prob, captured_at,
+                   abs(prob - lag(prob) over (partition by outcome order by captured_at)) as step
+            from series
         )
-        select s.outcome,
-               (array_agg(s.prob order by s.captured_at asc))[1]  as open_prob,
-               (array_agg(s.prob order by s.captured_at desc))[1] as curr_prob,
-               max(h.max_step) as max_hourly_step
-        from series s join hourly h using (outcome)
-        group by s.outcome
+        select outcome,
+               (array_agg(prob order by captured_at asc))[1]  as open_prob,
+               (array_agg(prob order by captured_at desc))[1] as curr_prob,
+               max(step) as max_hourly_step
+        from steps
+        group by outcome
     """, (event_id, market))
 
 

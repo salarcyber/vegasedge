@@ -36,9 +36,33 @@ SPORTS = {
             "seasons": [(date(2023, 8, 11), date(2024, 5, 20)),
                         (date(2024, 8, 16), date(2025, 5, 26)),
                         (date(2025, 8, 15), date(2026, 5, 25))]},
+    "laliga": {"path": "soccer/esp.1",
+               "seasons": [(date(2023, 8, 11), date(2024, 5, 27)),
+                           (date(2024, 8, 15), date(2025, 5, 26)),
+                           (date(2025, 8, 15), date(2026, 5, 25))]},
+    "seriea": {"path": "soccer/ita.1",
+               "seasons": [(date(2023, 8, 19), date(2024, 5, 27)),
+                           (date(2024, 8, 17), date(2025, 5, 26)),
+                           (date(2025, 8, 23), date(2026, 5, 25))]},
+    "bundesliga": {"path": "soccer/ger.1",
+                   "seasons": [(date(2023, 8, 18), date(2024, 5, 19)),
+                               (date(2024, 8, 23), date(2025, 5, 18)),
+                               (date(2025, 8, 22), date(2026, 5, 17))]},
+    "ucl": {"path": "soccer/uefa.champions",
+            "seasons": [(date(2023, 9, 19), date(2024, 6, 2)),
+                        (date(2024, 9, 17), date(2025, 6, 1)),
+                        (date(2025, 9, 16), date(2026, 6, 1))]},
+    "mls": {"path": "soccer/usa.1",
+            "seasons": [(date(2024, 2, 21), date(2024, 12, 8)),
+                        (date(2025, 2, 22), date(2025, 12, 7)),
+                        (date(2026, 2, 21), date(2026, 12, 6))]},
+    "worldcup": {"path": "soccer/fifa.world",
+                 "seasons": [(date(2026, 6, 11), date(2026, 7, 19))]},
 }
-# note: 'epl' games are stored with sport='soccer_epl' to match the odds ingester
-DB_SPORT = {"epl": "soccer_epl"}
+# CLI name -> sport value stored in the DB (must match the odds ingester)
+DB_SPORT = {"epl": "soccer_epl", "laliga": "soccer_laliga", "seriea": "soccer_seriea",
+            "bundesliga": "soccer_bundesliga", "ucl": "soccer_ucl", "mls": "soccer_mls",
+            "worldcup": "worldcup"}
 
 
 def backfill_games(conn, sport: str) -> int:
@@ -162,45 +186,75 @@ def metrics_nhl(conn) -> None:
         print(f"[metrics] nhl season ending {end_date}: {len(rows)} teams")
 
 
+def metrics_from_games(conn, sport: str, db_sport: str, keys: tuple[str, str],
+                       min_matches: int = 10) -> None:
+    """Per-season scoring metrics computed from our own backfilled games —
+    no external API to block or break. keys = (for_key, against_key)."""
+    from src.utils.db import query
+
+    for_key, against_key = keys
+    for start, end in SPORTS[sport]["seasons"]:
+        rows = query(conn, """
+            with sides as (
+              select home_team_id team_id, home_score pf, away_score pa
+              from games where sport=%s and status='final'
+                and commence_time::date between %s and %s
+              union all
+              select away_team_id, away_score, home_score
+              from games where sport=%s and status='final'
+                and commence_time::date between %s and %s
+            )
+            select team_id, count(*) n, avg(pf) pf_pg, avg(pa) pa_pg,
+                   avg((pf > pa)::int) win_pct
+            from sides group by team_id having count(*) >= %s
+        """, (db_sport, start, end, db_sport, start, end, min_matches))
+        metrics = [{"team_id": r["team_id"], "as_of": start,
+                    "metrics": {for_key: round(float(r["pf_pg"]), 3),
+                                against_key: round(float(r["pa_pg"]), 3),
+                                "net_pg": round(float(r["pf_pg"] - r["pa_pg"]), 3),
+                                "win_pct": round(float(r["win_pct"]), 3),
+                                "matches": r["n"]}} for r in rows]
+        upsert(conn, "team_metrics", metrics, ["team_id", "as_of"])
+        print(f"[metrics] {sport} {start.year}-{end.year}: {len(metrics)} teams (from game data)")
+
+
 def metrics_epl(conn) -> None:
-    from src.ingestion.stats_ingest import ingest_soccer_understat
-    # current season only via the live ingester; historical understat seasons:
-    import json
-    import re
-    for season, as_of in (("2023", date(2023, 8, 11)), ("2024", date(2024, 8, 16)),
-                          ("2025", date(2025, 8, 15))):
-        try:
-            r = httpx.get(f"https://understat.com/league/EPL/{season}",
-                          headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
-            m = re.search(r"teamsData\s*=\s*JSON\.parse\('(.+?)'\)", r.text)
-            data = json.loads(m.group(1).encode().decode("unicode_escape"))
-            rows = []
-            for team in data.values():
-                hist = team["history"]
-                n = len(hist) or 1
-                rows.append({"team_id": f"soccer_epl_{team['title']}", "as_of": as_of,
-                             "metrics": {"xg_for": round(sum(h["xG"] for h in hist) / n, 3),
-                                         "xg_against": round(sum(h["xGA"] for h in hist) / n, 3)}})
-            upsert(conn, "teams", [{"team_id": x["team_id"], "sport": "soccer_epl",
-                                    "name": x["team_id"][11:]} for x in rows], ["team_id"])
-            upsert(conn, "team_metrics", rows, ["team_id", "as_of"])
-            print(f"[metrics] epl {season}: {len(rows)} teams")
-        except Exception as e:
-            print(f"[metrics] epl {season} failed: {e}")
+    metrics_from_games(conn, "epl", "soccer_epl", ("gf_per_game", "ga_per_game"))
 
 
-METRICS = {"nba": metrics_nba, "nfl": metrics_nfl, "nhl": metrics_nhl, "epl": metrics_epl}
+def metrics_nba_from_games(conn) -> None:
+    metrics_from_games(conn, "nba", "nba", ("pf_pg", "pa_pg"))
+
+
+def _soccer_metrics(sport: str, min_matches: int = 10):
+    def run(conn):
+        metrics_from_games(conn, sport, DB_SPORT.get(sport, sport),
+                           ("gf_per_game", "ga_per_game"), min_matches)
+    return run
+
+
+METRICS = {
+    "nba": metrics_nba_from_games, "nfl": metrics_nfl, "nhl": metrics_nhl,
+    "epl": metrics_epl,
+    "laliga": _soccer_metrics("laliga"), "seriea": _soccer_metrics("seriea"),
+    "bundesliga": _soccer_metrics("bundesliga"), "ucl": _soccer_metrics("ucl", 4),
+    "mls": _soccer_metrics("mls"),
+    "worldcup": _soccer_metrics("worldcup", 3),  # short tournament, few matches
+}
 
 if __name__ == "__main__":
     targets = sys.argv[1:] or list(SPORTS)
-    with get_conn() as conn:
-        for t in targets:
-            try:
-                METRICS[t](conn)
-            except Exception as e:
-                print(f"[metrics] {t} FAILED: {e}")
-            try:
+    # one connection per sport so a dropped connection can't kill the whole run;
+    # games before metrics so team rows exist for the FK
+    for t in targets:
+        try:
+            with get_conn() as conn:
                 backfill_games(conn, t)
-            except Exception as e:
-                print(f"[backfill] {t} FAILED: {e}")
+        except Exception as e:
+            print(f"[backfill] {t} FAILED: {e}")
+        try:
+            with get_conn() as conn:
+                METRICS[t](conn)
+        except Exception as e:
+            print(f"[metrics] {t} FAILED: {e}")
     print("[backfill] history run complete")

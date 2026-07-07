@@ -23,7 +23,9 @@ from src.utils.db import query
 
 # Which jsonb metrics feed the model, per sport. Differential = home - away.
 SPORT_METRICS = {
-    "nba": ["net_rating", "off_rating", "def_rating", "pace", "efg_pct", "tov_pct"],
+    # game-derived scoring metrics (robust everywhere); nba_api advanced metrics
+    # (net_rating etc.) get merged in by the live pipeline when reachable
+    "nba": ["pf_pg", "pa_pg", "net_pg", "win_pct"],
     "nfl": ["epa_off", "epa_def", "success_off", "success_def"],
     "mlb": ["ops", "runs_pg", "era", "whip"],
     "nhl": ["gf_per_game", "ga_per_game", "point_pct"],
