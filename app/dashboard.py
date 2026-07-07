@@ -99,10 +99,12 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, bool]:
         from src.utils.db import get_conn, query
         with get_conn() as conn:
             picks = pd.DataFrame(query(conn, """
-                select p.*, g.sport, g.commence_time, g.home_team_id, g.away_team_id
+                select distinct on (p.event_id, p.market, p.outcome)
+                       p.*, g.sport, g.commence_time, g.home_team_id, g.away_team_id
                 from predictions p join games g using (event_id)
                 where g.commence_time > now() - interval '6 hours'
-                order by p.ev_pct desc nulls last limit 200
+                order by p.event_id, p.market, p.outcome, p.created_at desc
+                limit 200
             """))
             bank = pd.DataFrame(query(conn, "select ts, balance from bankroll order by ts"))
         return picks, bank, False
