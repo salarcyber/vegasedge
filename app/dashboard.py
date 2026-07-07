@@ -225,7 +225,7 @@ else:
         st.markdown(f"""
         <div class='ve-ticker-row'>
           <div><span class='ve-match'>{away} @ {home}</span><br>
-               <span class='ve-sub'>{str(r['sport']).upper()} · pick: {r['outcome']} ({r['market']})</span></div>
+               <span class='ve-sub'>{str(r['sport']).upper()} · {'PICK' if r['is_value_bet'] else 'priced'}: {r['outcome']} ({r['market']}{', settles at 90 min' if str(r['sport']).startswith(('soccer', 'worldcup')) and r['market'] == 'h2h' else ''})</span></div>
           <div class='ve-num'>{american(r['best_decimal'])}<br><span class='ve-sub'>{r['best_book']}</span></div>
           <div class='ve-num'>{american(r['fair_decimal'])}<br><span class='ve-sub'>p = {r['model_prob']:.0%}</span></div>
           <div class='{edge_cls}'>{'+' if ev >= 0 else ''}{ev:.1f}%</div>
