@@ -18,9 +18,21 @@ load_dotenv()
 @contextmanager
 def get_conn():
     url = os.environ["DATABASE_URL"]
-    with psycopg.connect(url, autocommit=False) as conn:
-        yield conn
-        conn.commit()
+    try:
+        conn = psycopg.connect(url, autocommit=False, connect_timeout=15)
+    except psycopg.OperationalError:
+        # Some networks/VPNs block 5432; Supabase's transaction pooler on 6543
+        # usually gets through. It doesn't support prepared statements, so
+        # disable them for the fallback connection.
+        fallback = url.replace(":5432/", ":6543/")
+        conn = psycopg.connect(fallback, autocommit=False, connect_timeout=15,
+                               prepare_threshold=None)
+    try:
+        with conn:
+            yield conn
+            conn.commit()
+    finally:
+        conn.close()
 
 
 def upsert(conn, table: str, rows: list[dict], conflict_cols: list[str]) -> int:
