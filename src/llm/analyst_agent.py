@@ -27,20 +27,26 @@ SYSTEM_PROMPT = (Path(__file__).parent / "system_prompt.md").read_text(encoding=
 def call_llm(system: str, user: str) -> str:
     provider = os.environ.get("LLM_PROVIDER", "groq")
     if provider == "groq":
-        r = httpx.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"},
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [{"role": "system", "content": system},
-                             {"role": "user", "content": user}],
-                "temperature": 0.3,
-                "max_tokens": 400,
-            },
-            timeout=60,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+        import time
+        for attempt in range(4):
+            r = httpx.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [{"role": "system", "content": system},
+                                 {"role": "user", "content": user}],
+                    "temperature": 0.3,
+                    "max_tokens": 400,
+                },
+                timeout=60,
+            )
+            if r.status_code == 429 and attempt < 3:  # free-tier rate limit: back off
+                wait = float(r.headers.get("retry-after", 20)) + 2
+                time.sleep(min(wait, 60))
+                continue
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
     if provider == "gemini":
         r = httpx.post(
             "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -111,14 +117,18 @@ def build_dossier(conn, pred: dict) -> dict:
     }
 
 
-def main(max_bets: int = 15) -> None:
+def main(max_bets: int = 40) -> None:
+    """Brief one outcome per upcoming game: the value bet when there is one,
+    otherwise the model's most likely outcome (a 'lean'), so the dashboard has
+    reasoning for every card."""
     with get_conn() as conn:
         preds = query(conn, """
-            select p.* from predictions p
+            select distinct on (p.event_id) p.*
+            from predictions p
             join games g using (event_id)
-            where p.is_value_bet and p.reasoning is null
-              and g.commence_time > now()
-            order by p.ev_pct desc limit %s
+            where p.reasoning is null and g.commence_time > now()
+            order by p.event_id, p.is_value_bet desc, p.model_prob desc
+            limit %s
         """, (max_bets,))
         bank = query(conn, "select balance from bankroll order by ts desc limit 1")
         balance = bank[0]["balance"] if bank else 1000.0
