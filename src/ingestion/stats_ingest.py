@@ -52,7 +52,8 @@ def ingest_nba(conn) -> None:
 
 def ingest_nfl(conn, season: int) -> None:
     import nfl_data_py as nfl
-    import pandas as pd
+
+    from src.ingestion.backfill_history import NFL_ABBR
 
     pbp = nfl.import_pbp_data([season], columns=[
         "posteam", "defteam", "epa", "success", "pass", "rush"
@@ -64,10 +65,10 @@ def ingest_nfl(conn, season: int) -> None:
                                       success_def=("success", "mean"))
     merged = off.join(deff)
     rows = [{
-        "team_id": f"nfl_{team}",
+        "team_id": f"nfl_{NFL_ABBR[team]}",
         "as_of": TODAY,
         "metrics": {k: round(float(v), 4) for k, v in m.items()},
-    } for team, m in merged.iterrows()]
+    } for team, m in merged.iterrows() if team in NFL_ABBR]
     upsert(conn, "teams", [{"team_id": x["team_id"], "sport": "nfl",
                             "name": x["team_id"][4:]} for x in rows], ["team_id"])
     upsert(conn, "team_metrics", rows, ["team_id", "as_of"])
@@ -75,24 +76,10 @@ def ingest_nfl(conn, season: int) -> None:
 
 
 def ingest_mlb(conn, season: int) -> None:
-    from pybaseball import team_batting, team_pitching
+    from src.ingestion.backfill_mlb import fetch_mlb_team_stats
 
-    bat = team_batting(season)
-    pit = team_pitching(season)
-    rows = []
-    for _, r in bat.iterrows():
-        team = r["Team"]
-        p = pit[pit["Team"] == team]
-        rows.append({
-            "team_id": f"mlb_{team}",
-            "as_of": TODAY,
-            "metrics": {
-                "wrc_plus": float(r["wRC+"]),
-                "woba": float(r["wOBA"]),
-                "fip": float(p["FIP"].iloc[0]) if len(p) else None,
-                "era": float(p["ERA"].iloc[0]) if len(p) else None,
-            },
-        })
+    rows = [{"team_id": f"mlb_{name}", "as_of": TODAY, "metrics": m}
+            for name, m in fetch_mlb_team_stats(season).items()]
     upsert(conn, "teams", [{"team_id": x["team_id"], "sport": "mlb",
                             "name": x["team_id"][4:]} for x in rows], ["team_id"])
     upsert(conn, "team_metrics", rows, ["team_id", "as_of"])

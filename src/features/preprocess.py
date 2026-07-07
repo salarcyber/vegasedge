@@ -25,7 +25,7 @@ from src.utils.db import query
 SPORT_METRICS = {
     "nba": ["net_rating", "off_rating", "def_rating", "pace", "efg_pct", "tov_pct"],
     "nfl": ["epa_off", "epa_def", "success_off", "success_def"],
-    "mlb": ["wrc_plus", "woba", "fip", "era"],
+    "mlb": ["ops", "runs_pg", "era", "whip"],
     "nhl": ["gf_per_game", "ga_per_game", "point_pct"],
     "soccer_epl": ["xg_for", "xg_against", "ppda"],
 }

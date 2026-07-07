@@ -2,6 +2,11 @@
 .venv/
 __pycache__/
 *.pyc
-artifacts/
 .streamlit/secrets.toml
 nltk_data/
+
+# model artifacts ARE committed (the cloud pipeline loads them),
+# but keep scratch outputs out
+artifacts/*
+!artifacts/*.joblib
+!artifacts/*-latest.txt
