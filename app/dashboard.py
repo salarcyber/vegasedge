@@ -175,7 +175,14 @@ if search and not picks.empty:
 balance = bank["balance"].iloc[-1] if not bank.empty else 1000.0
 pnl_30d = balance - (bank["balance"].iloc[max(0, len(bank) - 30)] if not bank.empty else balance)
 n_value = int(picks["is_value_bet"].sum()) if not picks.empty else 0
-best_ev = picks["ev_pct"].max() if not picks.empty else 0.0
+vb_only = picks[picks["is_value_bet"]] if not picks.empty else picks
+best_ev = vb_only["ev_pct"].max() if not vb_only.empty else 0.0
+if not picks.empty:  # value bets first (best edge on top); PASS rows sorted by
+    # distance from market so model-error outliers sink to the bottom
+    picks = pd.concat([
+        picks[picks["is_value_bet"]].sort_values("ev_pct", ascending=False),
+        picks[~picks["is_value_bet"]].sort_values("ev_pct", key=lambda s: s.abs()),
+    ])
 
 def tile(col, label, value, delta=None, up=True):
     d = (f"<div class='delta-{'up' if up else 'down'}'>{delta}</div>" if delta else "")
