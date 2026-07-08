@@ -150,9 +150,17 @@ def main(sports: list[str]) -> None:
             except Exception as e:
                 print(f"[value] {sport} failed: {e}")
         # replace, don't append: clear prior prices for the games being repriced
-        # (keeps one live row per event/market/outcome; settled games untouched)
+        # (keeps one live row per event/market/outcome; settled games untouched).
+        # Carry the AI briefings over so repricing never blanks the dashboard
+        # and the LLM writes each game up once, not every hour.
         event_ids = list({r["event_id"] for r in all_rows})
         if event_ids:
+            old = query(conn, """select event_id, market, outcome, reasoning
+                                 from predictions where event_id = any(%s)
+                                   and reasoning is not null""", (event_ids,))
+            kept = {(o["event_id"], o["market"], o["outcome"]): o["reasoning"] for o in old}
+            for r in all_rows:
+                r["reasoning"] = kept.get((r["event_id"], r["market"], r["outcome"]))
             with conn.cursor() as cur:
                 cur.execute("""delete from predictions p using games g
                                where p.event_id = g.event_id and g.status = 'scheduled'
