@@ -30,6 +30,12 @@ ESPN_SCOREBOARD = {
     "mlb": "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard",
     "nhl": "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard",
     "soccer_epl": "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard",
+    "worldcup": "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard",
+    "soccer_mls": "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard",
+    "soccer_laliga": "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard",
+    "soccer_seriea": "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard",
+    "soccer_bundesliga": "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard",
+    "soccer_ucl": "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard",
 }
 
 
@@ -169,6 +175,16 @@ def recalibrate(conn, sport: str, window_days: int = 90) -> None:
           f"clv={perf['avg_clv'] or 0:+.2f}% -> prob_shrink={shrink}")
 
 
+def sweep_stale_games(conn) -> None:
+    """Zombie listings (duplicate/abandoned odds events that never settle) linger
+    as 'scheduled' forever — retire them so they can't pollute the board."""
+    with conn.cursor() as cur:
+        cur.execute("""update games set status = 'stale'
+                       where status = 'scheduled'
+                         and commence_time < now() - interval '12 hours'""")
+        print(f"[settle] retired {cur.rowcount} stale game listings")
+
+
 if __name__ == "__main__":
     with get_conn() as conn:
         for sport in ESPN_SCOREBOARD:
@@ -176,5 +192,6 @@ if __name__ == "__main__":
         grade_bets(conn)
         for sport in ESPN_SCOREBOARD:
             recalibrate(conn, sport)
+        sweep_stale_games(conn)
         with conn.cursor() as cur:
             cur.execute("select prune_old_snapshots()")
