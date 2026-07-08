@@ -22,6 +22,8 @@ from src.utils.odds_math import evaluate_bet, expected_lambdas, match_probs
 MIN_EV = 0.02          # demand 2%+ edge; anything less is model noise
 MAX_EV = 0.20          # edges above 20% are almost always model error, not
                        # market error — flag them as no-bet until proven
+MAX_EV_SOCCER = 0.08   # backtest 2023-26 (1,846 bets vs closing): 2-8% edges
+                       # +1.05% flat ROI, 8-20% "edges" -1.64% — cap them out
 KELLY_MULT = 0.25      # quarter-Kelly
 DEFAULT_BANKROLL = 1000.0
 
@@ -117,7 +119,7 @@ def poisson_candidates(conn, sport: str, bankroll: float) -> list[dict]:
             if not m:
                 continue
             ev = evaluate_bet(true_p, m["best_decimal"], all_decs, bankroll,
-                              MIN_EV, KELLY_MULT)
+                              MIN_EV, KELLY_MULT, max_ev=MAX_EV_SOCCER)
             out.append({
                 "event_id": g["event_id"], "market": "h2h", "outcome": outcome,
                 "line": None, "model_prob": ev.true_prob,
@@ -166,6 +168,38 @@ def main(sports: list[str]) -> None:
                                where p.event_id = g.event_id and g.status = 'scheduled'
                                  and p.event_id = any(%s)""", (event_ids,))
         insert_many(conn, "predictions", all_rows)
+        alert_new_picks(conn, [r for r in all_rows if r["is_value_bet"]], bankroll)
+
+
+def alert_new_picks(conn, picks: list[dict], bankroll: float) -> None:
+    """Push MODEL PICK alerts to Discord (free webhook) so value doesn't expire
+    unseen. Set DISCORD_WEBHOOK in .env / GitHub secrets to enable."""
+    import os
+
+    hook = os.environ.get("DISCORD_WEBHOOK", "").strip()
+    if not hook or not picks:
+        return
+    import httpx
+
+    lines = []
+    for p in picks[:8]:
+        g = query(conn, """select home_team_id, away_team_id from games
+                           where event_id = %s""", (p["event_id"],))
+        if not g:
+            continue
+        home = g[0]["home_team_id"].split("_")[-1]
+        away = g[0]["away_team_id"].split("_")[-1]
+        stake = bankroll * (p["kelly_frac"] or 0)
+        lines.append(f"🔥 **{p['outcome']}** ({away} @ {home}) — edge +{p['ev_pct']}%, "
+                     f"bet ${stake:,.0f}")
+    if not lines:
+        return
+    try:
+        httpx.post(hook, json={"content": "**VegasEdge — new model picks**\n" +
+                                          "\n".join(lines)}, timeout=15)
+        print(f"[alert] sent {len(lines)} picks to Discord")
+    except Exception as e:
+        print(f"[alert] webhook failed: {e}")
 
 
 if __name__ == "__main__":

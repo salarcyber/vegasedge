@@ -32,6 +32,14 @@ SPORT_METRICS = {
     "soccer_epl": ["xg_for", "xg_against", "ppda"],
 }
 
+# per-sport extra features beyond team metrics + shared context
+SPORT_EXTRAS = {
+    "mlb": ["d_sp_era", "d_sp_whip", "d_sp_k9"],   # starting pitcher matchup
+}
+
+# point-in-time form, computed from our own game history at each game's date
+FORM_FEATURES = ["d_form_win15", "d_form_net15"]
+
 # Deep-data features are capped: sentiment/travel are weak, noisy signals and
 # must never dominate the core efficiency metrics. XGBoost learns its own
 # weights, but monotone constraints + these caps encode sane priors.
@@ -51,12 +59,27 @@ def build_matchup_frame(conn, sport: str, include_labels: bool) -> pd.DataFrame:
     """One row per game with differential features. include_labels=True pulls
     finished games (training); False pulls upcoming games (inference)."""
     status = "= 'final'" if include_labels else "= 'scheduled'"
+    form_sql = """
+        select avg((s.pf > s.pa)::int) win15, avg(s.pf - s.pa) net15, count(*) n
+        from (
+            select case when g2.home_team_id = %(tid)s then g2.home_score
+                        else g2.away_score end pf,
+                   case when g2.home_team_id = %(tid)s then g2.away_score
+                        else g2.home_score end pa
+            from games g2
+            where (g2.home_team_id = %(tid)s or g2.away_team_id = %(tid)s)
+              and g2.status = 'final' and g2.commence_time < g.commence_time
+            order by g2.commence_time desc limit 15
+        ) s
+    """
     games = query(conn, f"""
         select g.event_id, g.commence_time, g.home_team_id, g.away_team_id,
                g.home_score, g.away_score, g.home_rest_days, g.away_rest_days,
                g.home_travel_km, g.away_travel_km,
                hm.metrics home_m, am.metrics away_m,
-               gc.weather, gc.sentiment, gc.tz_crossed_away
+               gc.weather, gc.sentiment, gc.tz_crossed_away, gc.notes,
+               hf.win15 h_win15, hf.net15 h_net15, hf.n h_form_n,
+               af.win15 a_win15, af.net15 a_net15, af.n a_form_n
         from games g
         left join lateral (select metrics from team_metrics
             where team_id = g.home_team_id and as_of <= g.commence_time::date
@@ -64,6 +87,8 @@ def build_matchup_frame(conn, sport: str, include_labels: bool) -> pd.DataFrame:
         left join lateral (select metrics from team_metrics
             where team_id = g.away_team_id and as_of <= g.commence_time::date
             order by as_of desc limit 1) am on true
+        left join lateral ({form_sql.replace('%(tid)s', 'g.home_team_id')}) hf on true
+        left join lateral ({form_sql.replace('%(tid)s', 'g.away_team_id')}) af on true
         left join game_context gc on gc.event_id = g.event_id
         where g.sport = %s and g.status {status}
     """, (sport,))
@@ -91,6 +116,18 @@ def build_matchup_frame(conn, sport: str, include_labels: bool) -> pd.DataFrame:
         row["precip_mm"] = w.get("precip_mm")
         row["b2b_away"] = 1 if (g["away_rest_days"] is not None and g["away_rest_days"] <= 1) else 0
         row["market_home_prob_open"] = _opening_market_prob(conn, g["event_id"], g["home_team_id"])
+        # point-in-time form (require a real sample so early-season noise imputes)
+        if (g["h_form_n"] or 0) >= 5 and (g["a_form_n"] or 0) >= 5:
+            row["d_form_win15"] = round(float(g["h_win15"] - g["a_win15"]), 4)
+            row["d_form_net15"] = round(float(g["h_net15"] - g["a_net15"]), 4)
+        else:
+            row["d_form_win15"] = row["d_form_net15"] = None
+        # starting pitcher matchup (MLB)
+        notes = g.get("notes") or {}
+        hsp, asp = notes.get("home_sp") or {}, notes.get("away_sp") or {}
+        for stat in ("era", "whip", "k9"):
+            h, a = hsp.get(stat), asp.get(stat)
+            row[f"d_sp_{stat}"] = round(h - a, 3) if (h is not None and a is not None) else None
         if include_labels and g["home_score"] is not None:
             row["home_win"] = int(g["home_score"] > g["away_score"])
             row["total_points"] = g["home_score"] + g["away_score"]
@@ -100,15 +137,23 @@ def build_matchup_frame(conn, sport: str, include_labels: bool) -> pd.DataFrame:
 
 
 def _opening_market_prob(conn, event_id: str, home_team_id: str) -> float | None:
+    """Market prior for the model: devigged PINNACLE (sharpest book) when we
+    have it, else the devigged opening consensus."""
     from src.utils.odds_math import devig_multiplicative
 
     snaps = query(conn, """
-        select outcome, price_decimal from odds_snapshots
-        where event_id = %s and market = 'h2h' and is_opening
+        select distinct on (outcome) outcome, price_decimal from odds_snapshots
+        where event_id = %s and market = 'h2h' and bookmaker = 'pinnacle'
+        order by outcome, captured_at desc
     """, (event_id,))
     if len(snaps) < 2:
+        snaps = query(conn, """
+            select outcome, price_decimal from odds_snapshots
+            where event_id = %s and market = 'h2h' and is_opening
+        """, (event_id,))
+    if len(snaps) < 2:
         return None
-    home_name = home_team_id.split("_", 1)[1]
+    home_name = home_team_id.split("_", 1)[-1]
     decs = [s["price_decimal"] for s in snaps]
     probs = devig_multiplicative(decs)
     for s, p in zip(snaps, probs):
@@ -118,7 +163,8 @@ def _opening_market_prob(conn, event_id: str, home_team_id: str) -> float | None
 
 
 def feature_columns(sport: str) -> list[str]:
-    return [f"d_{m}" for m in SPORT_METRICS.get(sport, [])] + CONTEXT_FEATURES
+    return ([f"d_{m}" for m in SPORT_METRICS.get(sport, [])]
+            + SPORT_EXTRAS.get(sport, []) + FORM_FEATURES + CONTEXT_FEATURES)
 
 
 def make_preprocessor(sport: str) -> ColumnTransformer:

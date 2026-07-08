@@ -33,8 +33,9 @@ SPORTS = {
     "bundesliga": "soccer_germany_bundesliga",
     "mls": "soccer_usa_mls",
 }
-MARKETS = "h2h,totals"   # 2 credits/sport/pull; add spreads when the engine prices them
-REGIONS = "us"
+MARKETS = "h2h"          # add totals/spreads when the engine prices them
+REGIONS = "us,eu"        # eu includes Pinnacle — the sharp benchmark for true prob
+# cost: markets x regions = 2 credits per sport per pull (same as before)
 
 # CLI name -> sport value stored in the DB (shared with the backfiller)
 DB_SPORT = {"epl": "soccer_epl", "laliga": "soccer_laliga", "seriea": "soccer_seriea",

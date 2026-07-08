@@ -19,6 +19,7 @@ jobs:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
       LLM_PROVIDER: groq
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +42,8 @@ jobs:
           fi
       - name: Deep-data enrichment (weather, travel, injuries, sentiment)
         run: python -m src.ingestion.deep_data
+      - name: Starting pitchers (MLB)
+        run: python -m src.ingestion.pitchers current
       - name: Price bets (EV + Kelly)
         run: python -m src.betting.value_engine mlb worldcup mls
       - name: LLM analyst briefings
