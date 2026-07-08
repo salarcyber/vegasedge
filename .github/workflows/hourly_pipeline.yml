@@ -48,3 +48,7 @@ jobs:
         run: python -m src.betting.value_engine mlb worldcup mls
       - name: LLM analyst briefings
         run: python -m src.llm.analyst_agent
+      # grade finished games every hour so the record updates as nights end,
+      # not at 9:30 UTC the next morning
+      - name: Settle & grade finished games
+        run: python -m src.feedback.settle_and_learn
