@@ -276,13 +276,18 @@ if not results.empty:
         winner = home if hs > as_ else away if as_ > hs else "Draw"
         correct = (r["pick"] == winner)
         rec_w += int(correct); rec_l += int(not correct)
-        pnl_total += float(r["pnl"] or 0)
+        # SQL NULLs surface as NaN here, and NaN is truthy — `or 0` won't catch it.
+        pnl = float(r["pnl"]) if pd.notna(r["pnl"]) else 0.0
+        pnl_total += pnl
+        # US local date, not UTC: a 7pm West Coast game lands on the next UTC
+        # day and would collide with the following game of the series.
+        when = pd.Timestamp(r["commence_time"]).tz_convert("America/New_York")
         graded_rows.append({
             "correct": correct, "league": LEAGUE_LABEL.get(str(r["sport"]), str(r["sport"]).upper()),
             "match": f"{away} @ {home}", "score": f"{int(as_)}–{int(hs)}",
             "pick": r["pick"], "prob": float(r["model_prob"] or 0),
-            "was_bet": r["bet_result"] is not None, "pnl": r["pnl"],
-            "when": pd.Timestamp(r["commence_time"]).strftime("%b %d"),
+            "was_bet": pd.notna(r["bet_result"]), "pnl": pnl,
+            "when": when.strftime("%b %d"),
         })
 
 # ----------------------------------------------------------------- header row

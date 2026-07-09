@@ -53,7 +53,8 @@ def fetch_finals(sport: str, day: date) -> list[dict]:
             away = next(c for c in comp["competitors"] if c["homeAway"] == "away")
             out.append({"home_name": home["team"]["displayName"],
                         "away_name": away["team"]["displayName"],
-                        "home_score": int(home["score"]), "away_score": int(away["score"])})
+                        "home_score": int(home["score"]), "away_score": int(away["score"]),
+                        "commence": ev["date"]})
     return out
 
 
@@ -66,15 +67,27 @@ def settle_games(conn, sport: str) -> int:
             print(f"[settle] {sport} {d} scoreboard failed: {e}")
             continue
         for f in finals:
+            # Match by kickoff timestamp, not date window: same-series games on
+            # consecutive days (and doubleheaders) share team names, and West
+            # Coast night games straddle UTC dates — a name+date match stamps
+            # one game's score onto its sibling. ESPN's event time agrees with
+            # The Odds API's to the minute, so the nearest row within 3h is
+            # unambiguous; a duplicate listing of the same game loses the
+            # nearest-match and is later retired by sweep_stale_games.
             with conn.cursor() as cur:
                 cur.execute("""
-                    update games g set status='final', home_score=%s, away_score=%s
-                    from teams ht, teams at
-                    where ht.team_id = g.home_team_id and at.team_id = g.away_team_id
-                      and ht.name = %s and at.name = %s and g.status != 'final'
-                      and g.commence_time::date between %s and %s
+                    update games set status='final', home_score=%s, away_score=%s
+                    where event_id = (
+                        select g.event_id from games g
+                        join teams ht on ht.team_id = g.home_team_id
+                        join teams at on at.team_id = g.away_team_id
+                        where ht.name = %s and at.name = %s and g.status != 'final'
+                          and abs(extract(epoch from (g.commence_time - %s::timestamptz))) < 10800
+                        order by abs(extract(epoch from (g.commence_time - %s::timestamptz)))
+                        limit 1
+                    )
                 """, (f["home_score"], f["away_score"], f["home_name"], f["away_name"],
-                      d - timedelta(days=1), d))
+                      f["commence"], f["commence"]))
                 n += cur.rowcount
     print(f"[settle] {sport}: {n} games marked final")
     return n
