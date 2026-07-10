@@ -96,7 +96,7 @@ def settle_games(conn, sport: str) -> int:
 def grade_bets(conn) -> None:
     """Grade every unsettled flagged bet on a now-final game, with CLV."""
     open_bets = query(conn, """
-        select p.*, g.home_team_id, g.away_team_id, g.home_score, g.away_score,
+        select p.*, g.sport, g.home_team_id, g.away_team_id, g.home_score, g.away_score,
                g.commence_time
         from predictions p join games g using (event_id)
         left join bet_results br on br.pred_id = p.pred_id
@@ -107,9 +107,13 @@ def grade_bets(conn) -> None:
 
     results = []
     for b in open_bets:
-        home = b["home_team_id"].split("_", 1)[1]
+        # team_id is "<sport>_<name>" and sport itself may contain underscores
+        # ("soccer_epl_Arsenal") — split("_", 1) would yield "epl_Arsenal" and
+        # every soccer bet would grade as a loss. Strip the exact sport prefix.
+        home = b["home_team_id"][len(b["sport"]) + 1:]
+        away = b["away_team_id"][len(b["sport"]) + 1:]
         winner = home if b["home_score"] > b["away_score"] else \
-            b["away_team_id"].split("_", 1)[1] if b["away_score"] > b["home_score"] else "Draw"
+            away if b["away_score"] > b["home_score"] else "Draw"
         stake = round(balance * (b["kelly_frac"] or 0), 2)
         if b["market"] != "h2h":
             continue  # extend grading for spreads/totals/props as you add them

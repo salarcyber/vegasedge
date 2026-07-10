@@ -88,8 +88,8 @@ st.markdown(f"""
 # ----------------------------------------------------------------- data layer
 
 @st.cache_data(ttl=180)
-def load_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, bool]:
-    """(upcoming picks, bankroll curve, results ledger, is_demo)."""
+def load_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict | None, bool]:
+    """(upcoming picks, bankroll curve, results ledger, all-time record, is_demo)."""
     try:
         secret_url = st.secrets.get("DATABASE_URL", "")
     except Exception:
@@ -126,12 +126,50 @@ def load_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, bool]:
                        br.result bet_result, br.pnl, br.stake
                 from tops t
                 join games g using (event_id)
-                left join bet_results br on br.pred_id = t.pred_id
+                left join (
+                  -- match bets by event, not pred_id: repricing inserts a newer
+                  -- prediction row, so the graded bet hangs off an older pred_id
+                  -- and a pred_id join silently drops it from the ledger
+                  select p2.event_id,
+                         case when sum(br0.pnl) >= 0 then 'win' else 'loss' end result,
+                         sum(br0.pnl) pnl, sum(br0.stake) stake
+                  from bet_results br0 join predictions p2 using (pred_id)
+                  group by p2.event_id
+                ) br on br.event_id = t.event_id
                 where g.status = 'final'
                 order by g.commence_time desc limit 30
             """))
-        return picks, bank, results, False
-    return _demo_picks(), _demo_bankroll(), _demo_results(), True
+            # All-time record over EVERY graded pick — the ledger above is
+            # capped at 30 rows for display, so counting it would freeze the
+            # record at a rolling 30-game window.
+            record = query(conn, """
+                with latest as (
+                  select distinct on (p.event_id, p.outcome)
+                         p.event_id, p.outcome, p.model_prob, p.pred_id
+                  from predictions p where p.market = 'h2h'
+                  order by p.event_id, p.outcome, p.created_at desc
+                ), tops as (
+                  select distinct on (event_id) event_id, outcome pick, pred_id
+                  from latest order by event_id, model_prob desc
+                ), graded as (
+                  select t.pick,
+                         case when g.home_score > g.away_score
+                                then substring(g.home_team_id from length(g.sport) + 2)
+                              when g.away_score > g.home_score
+                                then substring(g.away_team_id from length(g.sport) + 2)
+                              else 'Draw' end as winner
+                  from tops t
+                  join games g using (event_id)
+                  where g.status = 'final'
+                    and g.home_score is not null and g.away_score is not null
+                )
+                select count(*) filter (where pick = winner)  as wins,
+                       count(*) filter (where pick <> winner) as losses,
+                       (select coalesce(sum(pnl), 0) from bet_results) as pnl
+                from graded
+            """)[0]
+        return picks, bank, results, record, False
+    return _demo_picks(), _demo_bankroll(), _demo_results(), None, True
 
 
 def _demo_picks() -> pd.DataFrame:
@@ -258,11 +296,12 @@ def build_games(picks: pd.DataFrame, bankroll: float) -> list[dict]:
     return out
 
 
-picks, bank, results, is_demo = load_frames()
+picks, bank, results, record, is_demo = load_frames()
 balance = float(bank["balance"].iloc[-1]) if not bank.empty else 1000.0
 games = build_games(picks, balance)
 
-# graded record from the results ledger
+# all-time record comes from the aggregate query (the ledger is only the
+# newest 30 games); demo mode has no aggregate, so count the demo rows
 rec_w = rec_l = 0
 pnl_total = 0.0
 graded_rows = []
@@ -289,6 +328,9 @@ if not results.empty:
             "was_bet": pd.notna(r["bet_result"]), "pnl": pnl,
             "when": when.strftime("%b %d"),
         })
+if record is not None:
+    rec_w, rec_l = int(record["wins"]), int(record["losses"])
+    pnl_total = float(record["pnl"])
 
 # ----------------------------------------------------------------- header row
 
