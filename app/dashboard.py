@@ -14,8 +14,9 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -45,6 +46,71 @@ ACCENT = "#00e68a"
 LOSS = "#f85149"
 
 GAME_HOURS = {"mlb": 3.3, "nba": 2.6, "nfl": 3.4, "nhl": 2.9}  # soccer default 2.3
+
+try:  # ESPN scoreboard URLs live with the settle job; live status is optional
+    from src.feedback.settle_and_learn import ESPN_SCOREBOARD
+except Exception:
+    ESPN_SCOREBOARD = {}
+
+
+@st.cache_data(ttl=90)
+def fetch_live_status(sports: tuple[str, ...]) -> list[dict]:
+    """Real game states from ESPN's free scoreboard: pre / in / post with
+    scores. The board must never guess LIVE from a clock — a game that runs
+    short or long would show the wrong state for hours."""
+    import httpx
+    rows = []
+    now = datetime.now(timezone.utc)
+    for sport in sports:
+        url = ESPN_SCOREBOARD.get(sport)
+        if not url:
+            continue
+        for day in (now - timedelta(days=1), now):
+            try:
+                r = httpx.get(url, params={"dates": day.strftime("%Y%m%d")}, timeout=8)
+                r.raise_for_status()
+                events = r.json().get("events", [])
+            except Exception:
+                continue  # ESPN down ≠ board down; cards fall back to kickoff clock
+            for ev in events:
+                try:
+                    comp = ev["competitions"][0]
+                    stype = comp["status"]["type"]
+                    home = next(c for c in comp["competitors"] if c["homeAway"] == "home")
+                    away = next(c for c in comp["competitors"] if c["homeAway"] == "away")
+                    rows.append({
+                        "sport": sport,
+                        "home": home["team"]["displayName"],
+                        "away": away["team"]["displayName"],
+                        "state": stype.get("state", "pre"),        # pre | in | post
+                        "detail": stype.get("shortDetail", ""),     # "Bot 5th", "FT", …
+                        "hs": int(home["score"]) if str(home.get("score", "")).isdigit() else None,
+                        "as": int(away["score"]) if str(away.get("score", "")).isdigit() else None,
+                        "commence": ev["date"],
+                    })
+                except (KeyError, IndexError, StopIteration):
+                    continue
+    return rows
+
+
+def attach_live(games: list[dict], live_rows: list[dict]) -> None:
+    """Stamp each board game with its real ESPN state, matched by team names
+    plus kickoff within 3h (same rule the settle job uses)."""
+    lookup: dict[tuple, list[dict]] = {}
+    for e in live_rows:
+        lookup.setdefault((e["sport"], e["home"].lower(), e["away"].lower()), []).append(e)
+    for g in games:
+        cands = lookup.get((g["_sport"], g["home"].lower(), g["away"].lower()), [])
+        kick = pd.Timestamp(g["kick"])
+        if kick.tzinfo is None:
+            kick = kick.tz_localize("UTC")
+        best, best_gap = None, 3 * 3600
+        for e in cands:
+            gap = abs((pd.Timestamp(e["commence"]) - kick).total_seconds())
+            if gap < best_gap:
+                best, best_gap = e, gap
+        g["live"] = ({"state": best["state"], "detail": best["detail"],
+                      "hs": best["hs"], "as": best["as"]} if best else None)
 
 st.markdown(f"""
 <style>
@@ -257,7 +323,10 @@ def build_games(picks: pd.DataFrame, bankroll: float) -> list[dict]:
         # rank duplicates: a listing whose game window hasn't passed beats a stale
         # "zombie" listing (wrong old kickoff); then prefer newest predictions
         dur = GAME_HOURS.get(str(g0["sport"]), 2.3)
-        not_ended = datetime.now() < (kick.tz_localize(None) + timedelta(hours=dur))
+        # compare in the kick's own timezone — datetime.now() is server-local
+        # and only happens to equal UTC on Streamlit Cloud
+        now_ref = pd.Timestamp.now(tz=kick.tzinfo) if kick.tzinfo else pd.Timestamp.now()
+        not_ended = now_ref < (kick + timedelta(hours=dur))
         rank = (not_ended, newest)
         if key in games and games[key]["_rank"] >= rank:
             continue
@@ -277,6 +346,7 @@ def build_games(picks: pd.DataFrame, bankroll: float) -> list[dict]:
         sport = str(g0["sport"])
         games[key] = {
             "_rank": rank,
+            "_sport": sport,
             "id": str(event_id),
             "league": LEAGUE_LABEL.get(sport, sport.upper()),
             "kick": kick.isoformat(),
@@ -300,6 +370,10 @@ def build_games(picks: pd.DataFrame, bankroll: float) -> list[dict]:
 picks, bank, results, ml, bet_pnl, is_demo = load_frames()
 balance = float(bank["balance"].iloc[-1]) if not bank.empty else 1000.0
 games = build_games(picks, balance)
+attach_live(games, fetch_live_status(tuple(sorted({g["_sport"] for g in games})))
+            if games and not is_demo else [])
+for g in games:
+    g.pop("_sport", None)
 
 # all-time record comes from the full moneyline frame (the ledger is only the
 # newest 30 games); demo mode has no frame, so count the demo rows
@@ -357,16 +431,25 @@ st.markdown(
     f"background:linear-gradient(90deg,{ACCENT},#22d3ee 60%,{VIOLET});"
     f"-webkit-background-clip:text;-webkit-text-fill-color:transparent;'>📈 VegasEdge</span>"
     f"<span style='color:{ACCENT};font-weight:700;font-size:0.78rem;letter-spacing:0.16em;'>MODEL BOARD</span>"
-    f"<span style='color:{INK_MUTED};font-size:0.85rem;'>{datetime.now():%A, %B %d}</span></div>",
+    f"<span style='color:{INK_MUTED};font-size:0.85rem;'>"
+    f"{datetime.now(ZoneInfo('America/Los_Angeles')):%A, %B %d}</span></div>",
     unsafe_allow_html=True)
 if is_demo:
     st.caption("⚠️ Demo data — set DATABASE_URL to connect your live database.")
 
 pnl_30 = balance - (float(bank["balance"].iloc[max(0, len(bank) - 30)]) if not bank.empty else balance)
 n_bets = sum(1 for g in games if g["isBet"])
-live_now = sum(1 for g in games
-               if 0 <= (datetime.now() - pd.Timestamp(g["kick"]).tz_localize(None)
-                        ).total_seconds() / 3600 <= g["durH"])
+
+
+def _is_live(g: dict) -> bool:
+    if g.get("live"):                      # trust ESPN's real state when we have it
+        return g["live"]["state"] == "in"
+    kick = pd.Timestamp(g["kick"])
+    now_ref = pd.Timestamp.now(tz=kick.tzinfo) if kick.tzinfo else pd.Timestamp.now()
+    return 0 <= (now_ref - kick).total_seconds() / 3600 <= g["durH"]
+
+
+live_now = sum(1 for g in games if _is_live(g))
 
 c1, c2, c3, c4 = st.columns(4)
 for col, accent, label, value, sub, cls in (
@@ -494,11 +577,23 @@ const hue = n => { let h = 0; for (const c of n) h = (h * 31 + c.charCodeAt(0)) 
 function status(g) {
   const now = new Date(), k = new Date(g.kick);
   const hrs = (now - k) / 36e5;
-  if (hrs >= 0 && hrs <= g.durH) return {cls: "live", html: `<span class="dot"></span>LIVE`};
-  if (hrs > g.durH) return {cls: "", html: "ENDED · grading soon"};
+  // real state from ESPN beats any clock guess
+  if (g.live && g.live.state === "post") {
+    const sc = g.live.as != null && g.live.hs != null ? ` · ${g.live.as}–${g.live.hs}` : "";
+    return {cls: "", html: `FINAL${sc}`};
+  }
+  if (g.live && g.live.state === "in") {
+    const sc = g.live.as != null && g.live.hs != null ? ` ${g.live.as}–${g.live.hs}` : "";
+    const det = g.live.detail ? ` · ${g.live.detail}` : "";
+    return {cls: "live", html: `<span class="dot"></span>LIVE${sc}${det}`};
+  }
+  const knownPre = g.live && g.live.state === "pre";  // delayed start: don't fake LIVE
+  if (!knownPre && hrs >= 0 && hrs <= g.durH) return {cls: "live", html: `<span class="dot"></span>LIVE`};
+  if (!knownPre && hrs > g.durH) return {cls: "", html: "ENDED · updating…"};
   const mins = Math.round(-hrs * 60);
   const t = k.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
-  if (mins < 60) return {cls: "", html: `in ${mins}m · ${t}`};
+  if (mins >= 0 && mins < 60) return {cls: "", html: `in ${mins}m · ${t}`};
+  if (mins < 0) return {cls: "", html: `Started · ${t}`};
   if (k.toDateString() === now.toDateString()) return {cls: "", html: `Today · ${t}`};
   return {cls: "", html: k.toLocaleDateString([], {weekday: "short"}) + " · " + t};
 }
@@ -550,12 +645,31 @@ function card(g) {
       </div>
     </div>`;
   el.addEventListener("click", () => el.classList.toggle("flipped"));
+  el.__g = g;
   return el;
 }
 
 GAMES.forEach(g => grid.appendChild(card(g)));
 requestAnimationFrame(() => setTimeout(() =>
   document.querySelectorAll(".fill").forEach(f => f.style.width = f.dataset.w + "%"), 60));
+
+// keep status chips honest while the tab sits open: recompute the clock-based
+// states every minute, and pull a fresh page (new ESPN data) when the user
+// comes back to a tab older than 4 minutes
+setInterval(() => {
+  document.querySelectorAll(".flip").forEach(el => {
+    if (!el.__g) return;
+    const s = status(el.__g), chip = el.querySelector(".status");
+    if (chip) { chip.className = "status " + s.cls; chip.innerHTML = s.html; }
+    el.classList.toggle("live", s.cls === "live");
+  });
+}, 60000);
+const loadedAt = Date.now();
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && Date.now() - loadedAt > 240000) {
+    try { window.parent.location.reload(); } catch (e) {}
+  }
+});
 
 document.getElementById("q").addEventListener("input", e => {
   const q = e.target.value.toLowerCase().trim();
