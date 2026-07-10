@@ -88,8 +88,8 @@ st.markdown(f"""
 # ----------------------------------------------------------------- data layer
 
 @st.cache_data(ttl=180)
-def load_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict | None, bool]:
-    """(upcoming picks, bankroll curve, results ledger, all-time record, is_demo)."""
+def load_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float | None, bool]:
+    """(upcoming picks, bankroll curve, results ledger, moneyline results, bet P/L, is_demo)."""
     try:
         secret_url = st.secrets.get("DATABASE_URL", "")
     except Exception:
@@ -139,37 +139,38 @@ def load_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict | None
                 where g.status = 'final'
                 order by g.commence_time desc limit 30
             """))
-            # All-time record over EVERY graded pick — the ledger above is
-            # capped at 30 rows for display, so counting it would freeze the
-            # record at a rolling 30-game window.
-            record = query(conn, """
+            # EVERY graded moneyline pick, oldest first — the all-time record
+            # and the flat-stake "moneyline only" profit curve both come from
+            # this (the 30-row ledger above is display-only and would freeze
+            # the record at a rolling window).
+            ml = pd.DataFrame(query(conn, """
                 with latest as (
                   select distinct on (p.event_id, p.outcome)
-                         p.event_id, p.outcome, p.model_prob, p.pred_id
+                         p.event_id, p.outcome, p.model_prob, p.best_decimal
                   from predictions p where p.market = 'h2h'
                   order by p.event_id, p.outcome, p.created_at desc
                 ), tops as (
-                  select distinct on (event_id) event_id, outcome pick, pred_id
+                  select distinct on (event_id)
+                         event_id, outcome pick, model_prob, best_decimal
                   from latest order by event_id, model_prob desc
-                ), graded as (
-                  select t.pick,
-                         case when g.home_score > g.away_score
-                                then substring(g.home_team_id from length(g.sport) + 2)
-                              when g.away_score > g.home_score
-                                then substring(g.away_team_id from length(g.sport) + 2)
-                              else 'Draw' end as winner
-                  from tops t
-                  join games g using (event_id)
-                  where g.status = 'final'
-                    and g.home_score is not null and g.away_score is not null
                 )
-                select count(*) filter (where pick = winner)  as wins,
-                       count(*) filter (where pick <> winner) as losses,
-                       (select coalesce(sum(pnl), 0) from bet_results) as pnl
-                from graded
-            """)[0]
-        return picks, bank, results, record, False
-    return _demo_picks(), _demo_bankroll(), _demo_results(), None, True
+                select t.pick, t.best_decimal, g.sport, g.commence_time,
+                       g.home_team_id, g.away_team_id,
+                       case when g.home_score > g.away_score
+                              then substring(g.home_team_id from length(g.sport) + 2)
+                            when g.away_score > g.home_score
+                              then substring(g.away_team_id from length(g.sport) + 2)
+                            else 'Draw' end as winner
+                from tops t
+                join games g using (event_id)
+                where g.status = 'final'
+                  and g.home_score is not null and g.away_score is not null
+                order by g.commence_time
+            """))
+            bet_pnl = float(query(conn,
+                "select coalesce(sum(pnl), 0) pnl from bet_results")[0]["pnl"])
+        return picks, bank, results, ml, bet_pnl, False
+    return _demo_picks(), _demo_bankroll(), _demo_results(), pd.DataFrame(), None, True
 
 
 def _demo_picks() -> pd.DataFrame:
@@ -296,12 +297,12 @@ def build_games(picks: pd.DataFrame, bankroll: float) -> list[dict]:
     return out
 
 
-picks, bank, results, record, is_demo = load_frames()
+picks, bank, results, ml, bet_pnl, is_demo = load_frames()
 balance = float(bank["balance"].iloc[-1]) if not bank.empty else 1000.0
 games = build_games(picks, balance)
 
-# all-time record comes from the aggregate query (the ledger is only the
-# newest 30 games); demo mode has no aggregate, so count the demo rows
+# all-time record comes from the full moneyline frame (the ledger is only the
+# newest 30 games); demo mode has no frame, so count the demo rows
 rec_w = rec_l = 0
 pnl_total = 0.0
 graded_rows = []
@@ -328,9 +329,25 @@ if not results.empty:
             "was_bet": pd.notna(r["bet_result"]), "pnl": pnl,
             "when": when.strftime("%b %d"),
         })
-if record is not None:
-    rec_w, rec_l = int(record["wins"]), int(record["losses"])
-    pnl_total = float(record["pnl"])
+if not ml.empty:
+    rec_w = int((ml["pick"] == ml["winner"]).sum())
+    rec_l = len(ml) - rec_w
+if bet_pnl is not None:
+    pnl_total = bet_pnl
+
+# flat $100 on every moneyline pick: win pays (odds-1)*100, a miss loses 100.
+# Picks with no stored price (rare) are dropped from the money curve but still
+# count in the record above.
+ML_STAKE = 100.0
+ml_curve = ml[pd.notna(ml["best_decimal"])].reset_index(drop=True) if not ml.empty else ml
+if not ml_curve.empty:
+    ml_curve = ml_curve.assign(
+        won=ml_curve["pick"] == ml_curve["winner"],
+        matchup=[f"{str(a).split('_')[-1]} @ {str(h).split('_')[-1]}"
+                 for a, h in zip(ml_curve["away_team_id"], ml_curve["home_team_id"])])
+    ml_curve["game_pnl"] = [round((float(d) - 1) * ML_STAKE, 2) if w else -ML_STAKE
+                            for d, w in zip(ml_curve["best_decimal"], ml_curve["won"])]
+    ml_curve["cum_pnl"] = ml_curve["game_pnl"].cumsum().round(2)
 
 # ----------------------------------------------------------------- header row
 
@@ -591,6 +608,48 @@ else:
     st.markdown(f"<div class='ve-tile'><div class='label'>No graded games yet</div>"
                 f"<div class='sub'>Results land here after tonight's games finish — the daily "
                 f"pipeline grades every pick against the real final score, win or lose.</div></div>",
+                unsafe_allow_html=True)
+
+st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+
+# ------------------------------------------------------- moneyline-only curve
+
+st.markdown(f"<div class='ve-kicker' style='color:#22d3ee'>MONEYLINE ONLY</div>",
+            unsafe_allow_html=True)
+st.markdown("### 💵 If you put $100 on every model pick")
+if not ml_curve.empty:
+    ml_total = float(ml_curve["cum_pnl"].iloc[-1])
+    ml_color = ACCENT if ml_total >= 0 else LOSS
+    st.markdown(
+        f"<div style='color:{INK_MUTED};margin-bottom:10px;'>"
+        f"<b style='color:{ml_color};font-size:1.3rem;'>{ml_total:+,.0f}</b> "
+        f"after {len(ml_curve)} games · flat $100 each, model's moneyline pick, "
+        f"best available odds</div>", unsafe_allow_html=True)
+    n_games = list(range(1, len(ml_curve) + 1))
+    hover = [f"Game {i} · {t:%b %d}<br>{m}<br>picked {p} — "
+             f"{'WON' if w else 'LOST'} {gp:+,.0f}"
+             for i, t, m, p, w, gp in zip(
+                 n_games, pd.to_datetime(ml_curve["commence_time"]),
+                 ml_curve["matchup"], ml_curve["pick"],
+                 ml_curve["won"], ml_curve["game_pnl"])]
+    fig = go.Figure(go.Scatter(
+        x=n_games, y=ml_curve["cum_pnl"], mode="lines",
+        line=dict(color="#22d3ee", width=2, shape="hv"),
+        fill="tozeroy", fillcolor="rgba(34,211,238,0.08)",
+        customdata=hover,
+        hovertemplate="%{customdata}<br><b>Running total: %{y:+,.0f}</b><extra></extra>"))
+    fig.add_hline(y=0, line_color=BORDER, line_width=1)
+    fig.update_layout(template=None, height=260, margin=dict(l=52, r=8, t=8, b=32),
+                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      xaxis=dict(color=INK_MUTED, showgrid=False,
+                                 title=dict(text="games played, oldest → newest",
+                                            font=dict(size=11))),
+                      yaxis=dict(color=INK_MUTED, gridcolor=BORDER, tickprefix="$"),
+                      hoverlabel=dict(bgcolor=PANEL, font_color=INK))
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+else:
+    st.markdown(f"<div class='ve-tile'><div class='label'>No graded picks yet</div>"
+                f"<div class='sub'>The curve starts after the first game finishes.</div></div>",
                 unsafe_allow_html=True)
 
 st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
