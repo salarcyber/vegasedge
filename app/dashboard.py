@@ -356,7 +356,7 @@ for col, accent, label, value, sub, cls in (
     (c1, ACCENT, "Bankroll", f"${balance:,.2f}", f"{pnl_30:+,.2f} last 30 days",
      "up" if pnl_30 >= 0 else "down"),
     (c2, "#22d3ee", "Model Record", f"{rec_w}–{rec_l}" if rec_w + rec_l else "—",
-     "graded picks, all games", "up" if rec_w >= rec_l else "down"),
+     "moneyline picks: did the model's winner win", "up" if rec_w >= rec_l else "down"),
     (c3, VIOLET, "Picks Today", f"{n_bets}",
      f"{live_now} live now · {len(games)} on the board", "up"),
     (c4, AMBER, "Staking", "¼ Kelly", "hard cap 5% per bet", ""),
