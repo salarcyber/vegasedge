@@ -83,6 +83,8 @@ def fetch_live_status(sports: tuple[str, ...]) -> list[dict]:
                         "home": home["team"]["displayName"],
                         "away": away["team"]["displayName"],
                         "state": stype.get("state", "pre"),        # pre | in | post
+                        # post but not completed = postponed/suspended/canceled
+                        "completed": bool(stype.get("completed")),
                         "detail": stype.get("shortDetail", ""),     # "Bot 5th", "FT", …
                         "hs": int(home["score"]) if str(home.get("score", "")).isdigit() else None,
                         "as": int(away["score"]) if str(away.get("score", "")).isdigit() else None,
@@ -109,7 +111,8 @@ def attach_live(games: list[dict], live_rows: list[dict]) -> None:
             gap = abs((pd.Timestamp(e["commence"]) - kick).total_seconds())
             if gap < best_gap:
                 best, best_gap = e, gap
-        g["live"] = ({"state": best["state"], "detail": best["detail"],
+        g["live"] = ({"state": best["state"], "completed": best["completed"],
+                      "detail": best["detail"],
                       "hs": best["hs"], "as": best["as"]} if best else None)
 
 st.markdown(f"""
@@ -151,92 +154,122 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
+# A Streamlit tab shows its last render forever unless something reruns it.
+# Watchdog: reload when the user returns to a tab older than 4 minutes, and
+# quietly reload hidden tabs every 15 minutes so a tab left open overnight is
+# already fresh when they look at it. (Lives at page level so it works even
+# when the game board component isn't rendered.)
+components.html("""<script>
+const loadedAt = Date.now();
+function refresh() { try { window.parent.location.reload(); } catch (e) {} }
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && Date.now() - loadedAt > 240000) refresh();
+});
+setInterval(() => {
+  if (document.hidden && Date.now() - loadedAt > 900000) refresh();
+}, 60000);
+</script>""", height=0)
+
+
 # ----------------------------------------------------------------- data layer
 
 @st.cache_data(ttl=180)
-def load_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float | None, bool]:
-    """(upcoming picks, bankroll curve, results ledger, moneyline results, bet P/L, is_demo)."""
+def load_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float | None, str]:
+    """(upcoming picks, bankroll curve, results ledger, moneyline results, bet P/L, mode).
+
+    mode: 'live' (real data) | 'db_error' (db unreachable, demo shown) | 'demo'.
+    A database hiccup must degrade to a banner, never crash the whole app —
+    Streamlit Cloud renders an uncaught exception as 'Oh no. Error running app.'
+    """
     try:
         secret_url = st.secrets.get("DATABASE_URL", "")
     except Exception:
         secret_url = ""
     if os.environ.get("DATABASE_URL") or secret_url:
         os.environ.setdefault("DATABASE_URL", secret_url)
-        from src.utils.db import get_conn, query
-        with get_conn() as conn:
-            picks = pd.DataFrame(query(conn, """
-                select distinct on (p.event_id, p.outcome)
-                       p.event_id, p.outcome, p.model_prob, p.ev_pct, p.kelly_frac,
-                       p.is_value_bet, p.reasoning, p.created_at,
-                       g.sport, g.commence_time, g.home_team_id, g.away_team_id
-                from predictions p join games g using (event_id)
-                where p.market = 'h2h' and g.status = 'scheduled'
-                  and g.commence_time > now() - interval '6 hours'
-                  and g.commence_time < now() + interval '60 hours'
-                order by p.event_id, p.outcome, p.created_at desc
-                limit 500
-            """))
-            bank = pd.DataFrame(query(conn, "select ts, balance from bankroll order by ts"))
-            results = pd.DataFrame(query(conn, """
-                with latest as (
-                  select distinct on (p.event_id, p.outcome)
-                         p.event_id, p.outcome, p.model_prob, p.is_value_bet, p.pred_id
-                  from predictions p where p.market = 'h2h'
-                  order by p.event_id, p.outcome, p.created_at desc
-                ), tops as (
-                  select distinct on (event_id) event_id, outcome pick, model_prob, pred_id
-                  from latest order by event_id, model_prob desc
-                )
-                select t.pick, t.model_prob, g.sport, g.commence_time,
-                       g.home_team_id, g.away_team_id, g.home_score, g.away_score,
-                       br.result bet_result, br.pnl, br.stake
-                from tops t
-                join games g using (event_id)
-                left join (
-                  -- match bets by event, not pred_id: repricing inserts a newer
-                  -- prediction row, so the graded bet hangs off an older pred_id
-                  -- and a pred_id join silently drops it from the ledger
-                  select p2.event_id,
-                         case when sum(br0.pnl) >= 0 then 'win' else 'loss' end result,
-                         sum(br0.pnl) pnl, sum(br0.stake) stake
-                  from bet_results br0 join predictions p2 using (pred_id)
-                  group by p2.event_id
-                ) br on br.event_id = t.event_id
-                where g.status = 'final'
-                order by g.commence_time desc limit 30
-            """))
-            # EVERY graded moneyline pick, oldest first — the all-time record
-            # and the flat-stake "moneyline only" profit curve both come from
-            # this (the 30-row ledger above is display-only and would freeze
-            # the record at a rolling window).
-            ml = pd.DataFrame(query(conn, """
-                with latest as (
-                  select distinct on (p.event_id, p.outcome)
-                         p.event_id, p.outcome, p.model_prob, p.best_decimal
-                  from predictions p where p.market = 'h2h'
-                  order by p.event_id, p.outcome, p.created_at desc
-                ), tops as (
-                  select distinct on (event_id)
-                         event_id, outcome pick, model_prob, best_decimal
-                  from latest order by event_id, model_prob desc
-                )
-                select t.pick, t.best_decimal, g.sport, g.commence_time,
-                       g.home_team_id, g.away_team_id,
-                       case when g.home_score > g.away_score
-                              then substring(g.home_team_id from length(g.sport) + 2)
-                            when g.away_score > g.home_score
-                              then substring(g.away_team_id from length(g.sport) + 2)
-                            else 'Draw' end as winner
-                from tops t
-                join games g using (event_id)
-                where g.status = 'final'
-                  and g.home_score is not null and g.away_score is not null
-                order by g.commence_time
-            """))
-            bet_pnl = float(query(conn,
-                "select coalesce(sum(pnl), 0) pnl from bet_results")[0]["pnl"])
-        return picks, bank, results, ml, bet_pnl, False
-    return _demo_picks(), _demo_bankroll(), _demo_results(), pd.DataFrame(), None, True
+        try:
+            return _load_live_frames() + ("live",)
+        except Exception:
+            return (_demo_picks(), _demo_bankroll(), _demo_results(),
+                    pd.DataFrame(), None, "db_error")
+    return _demo_picks(), _demo_bankroll(), _demo_results(), pd.DataFrame(), None, "demo"
+
+
+def _load_live_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float]:
+    from src.utils.db import get_conn, query
+    with get_conn() as conn:
+        picks = pd.DataFrame(query(conn, """
+            select distinct on (p.event_id, p.outcome)
+                   p.event_id, p.outcome, p.model_prob, p.ev_pct, p.kelly_frac,
+                   p.is_value_bet, p.reasoning, p.created_at,
+                   g.sport, g.commence_time, g.home_team_id, g.away_team_id
+            from predictions p join games g using (event_id)
+            where p.market = 'h2h' and g.status = 'scheduled'
+              and g.commence_time > now() - interval '6 hours'
+              and g.commence_time < now() + interval '60 hours'
+            order by p.event_id, p.outcome, p.created_at desc
+            limit 500
+        """))
+        bank = pd.DataFrame(query(conn, "select ts, balance from bankroll order by ts"))
+        results = pd.DataFrame(query(conn, """
+            with latest as (
+              select distinct on (p.event_id, p.outcome)
+                     p.event_id, p.outcome, p.model_prob, p.is_value_bet, p.pred_id
+              from predictions p where p.market = 'h2h'
+              order by p.event_id, p.outcome, p.created_at desc
+            ), tops as (
+              select distinct on (event_id) event_id, outcome pick, model_prob, pred_id
+              from latest order by event_id, model_prob desc
+            )
+            select t.pick, t.model_prob, g.sport, g.commence_time,
+                   g.home_team_id, g.away_team_id, g.home_score, g.away_score,
+                   br.result bet_result, br.pnl, br.stake
+            from tops t
+            join games g using (event_id)
+            left join (
+              -- match bets by event, not pred_id: repricing inserts a newer
+              -- prediction row, so the graded bet hangs off an older pred_id
+              -- and a pred_id join silently drops it from the ledger
+              select p2.event_id,
+                     case when sum(br0.pnl) >= 0 then 'win' else 'loss' end result,
+                     sum(br0.pnl) pnl, sum(br0.stake) stake
+              from bet_results br0 join predictions p2 using (pred_id)
+              group by p2.event_id
+            ) br on br.event_id = t.event_id
+            where g.status = 'final'
+            order by g.commence_time desc limit 30
+        """))
+        # EVERY graded moneyline pick, oldest first — the all-time record
+        # and the flat-stake "moneyline only" profit curve both come from
+        # this (the 30-row ledger above is display-only and would freeze
+        # the record at a rolling window).
+        ml = pd.DataFrame(query(conn, """
+            with latest as (
+              select distinct on (p.event_id, p.outcome)
+                     p.event_id, p.outcome, p.model_prob, p.best_decimal
+              from predictions p where p.market = 'h2h'
+              order by p.event_id, p.outcome, p.created_at desc
+            ), tops as (
+              select distinct on (event_id)
+                     event_id, outcome pick, model_prob, best_decimal
+              from latest order by event_id, model_prob desc
+            )
+            select t.pick, t.best_decimal, g.sport, g.commence_time,
+                   g.home_team_id, g.away_team_id,
+                   case when g.home_score > g.away_score
+                          then substring(g.home_team_id from length(g.sport) + 2)
+                        when g.away_score > g.home_score
+                          then substring(g.away_team_id from length(g.sport) + 2)
+                        else 'Draw' end as winner
+            from tops t
+            join games g using (event_id)
+            where g.status = 'final'
+              and g.home_score is not null and g.away_score is not null
+            order by g.commence_time
+        """))
+        bet_pnl = float(query(conn,
+            "select coalesce(sum(pnl), 0) pnl from bet_results")[0]["pnl"])
+        return picks, bank, results, ml, bet_pnl
 
 
 def _demo_picks() -> pd.DataFrame:
@@ -367,7 +400,8 @@ def build_games(picks: pd.DataFrame, bankroll: float) -> list[dict]:
     return out
 
 
-picks, bank, results, ml, bet_pnl, is_demo = load_frames()
+picks, bank, results, ml, bet_pnl, data_mode = load_frames()
+is_demo = data_mode != "live"
 balance = float(bank["balance"].iloc[-1]) if not bank.empty else 1000.0
 games = build_games(picks, balance)
 attach_live(games, fetch_live_status(tuple(sorted({g["_sport"] for g in games})))
@@ -434,7 +468,10 @@ st.markdown(
     f"<span style='color:{INK_MUTED};font-size:0.85rem;'>"
     f"{datetime.now(ZoneInfo('America/Los_Angeles')):%A, %B %d}</span></div>",
     unsafe_allow_html=True)
-if is_demo:
+if data_mode == "db_error":
+    st.error("⚠️ Database temporarily unreachable — showing placeholder data. "
+             "This resolves on its own; refresh in a minute.")
+elif data_mode == "demo":
     st.caption("⚠️ Demo data — set DATABASE_URL to connect your live database.")
 
 # all-time from the $1,000 start — "last 30 rows" of the bankroll curve is
@@ -463,9 +500,10 @@ for col, accent, label, value, sub, cls in (
      f"{live_now} live now · {len(games)} on the board", "up"),
     (c4, AMBER, "Staking", "¼ Kelly", "hard cap 5% per bet", ""),
 ):
-    col.markdown(f"<div class='ve-tile' style='--tile-accent:{accent}'>"
-                 f"<div class='label'>{label}</div><div class='value'>{value}</div>"
-                 f"<div class='sub {cls}'>{sub}</div></div>", unsafe_allow_html=True)
+    # st.html, not markdown: two $ signs in one markdown string become KaTeX math
+    col.html(f"<div class='ve-tile' style='--tile-accent:{accent}'>"
+             f"<div class='label'>{label}</div><div class='value'>{value}</div>"
+             f"<div class='sub {cls}'>{sub}</div></div>")
 
 st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
 
@@ -581,6 +619,8 @@ function status(g) {
   const hrs = (now - k) / 36e5;
   // real state from ESPN beats any clock guess
   if (g.live && g.live.state === "post") {
+    if (g.live.completed === false)  // postponed/suspended/canceled, not a real final
+      return {cls: "", html: (g.live.detail || "POSTPONED").toUpperCase()};
     const sc = g.live.as != null && g.live.hs != null ? ` · ${g.live.as}–${g.live.hs}` : "";
     return {cls: "", html: `FINAL${sc}`};
   }
@@ -736,11 +776,12 @@ st.markdown("### 💵 If you put $100 on every model pick")
 if not ml_curve.empty:
     ml_total = float(ml_curve["cum_pnl"].iloc[-1])
     ml_color = ACCENT if ml_total >= 0 else LOSS
-    st.markdown(
+    st.html(  # st.html: "$100" plus another "$" in one markdown string turns into KaTeX math
         f"<div style='color:{INK_MUTED};margin-bottom:10px;'>"
-        f"<b style='color:{ml_color};font-size:1.3rem;'>{ml_total:+,.0f}</b> "
+        f"<b style='color:{ml_color};font-size:1.3rem;'>"
+        f"{'+' if ml_total >= 0 else '-'}${abs(ml_total):,.0f}</b> "
         f"after {len(ml_curve)} games · flat $100 each, model's moneyline pick, "
-        f"best available odds</div>", unsafe_allow_html=True)
+        f"best available odds</div>")
     n_games = list(range(1, len(ml_curve) + 1))
     hover = [f"Game {i} · {t:%b %d}<br>{m}<br>picked {p} — "
              f"{'WON' if w else 'LOST'} {gp:+,.0f}"
