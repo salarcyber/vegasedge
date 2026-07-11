@@ -437,7 +437,9 @@ st.markdown(
 if is_demo:
     st.caption("⚠️ Demo data — set DATABASE_URL to connect your live database.")
 
-pnl_30 = balance - (float(bank["balance"].iloc[max(0, len(bank) - 30)]) if not bank.empty else balance)
+# all-time from the $1,000 start — "last 30 rows" of the bankroll curve is
+# neither 30 days nor all-time and reads as a fake loss after a hot start
+pnl_30 = balance - 1000.0
 n_bets = sum(1 for g in games if g["isBet"])
 
 
@@ -453,7 +455,7 @@ live_now = sum(1 for g in games if _is_live(g))
 
 c1, c2, c3, c4 = st.columns(4)
 for col, accent, label, value, sub, cls in (
-    (c1, ACCENT, "Bankroll", f"${balance:,.2f}", f"{pnl_30:+,.2f} last 30 days",
+    (c1, ACCENT, "Bankroll", f"${balance:,.2f}", f"{pnl_30:+,.2f} all-time from $1,000 start",
      "up" if pnl_30 >= 0 else "down"),
     (c2, "#22d3ee", "Model Record", f"{rec_w}–{rec_l}" if rec_w + rec_l else "—",
      "moneyline picks: did the model's winner win", "up" if rec_w >= rec_l else "down"),
