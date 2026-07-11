@@ -429,7 +429,10 @@ if not results.empty:
         pnl_total += pnl
         # US local date, not UTC: a 7pm West Coast game lands on the next UTC
         # day and would collide with the following game of the series.
-        when = pd.Timestamp(r["commence_time"]).tz_convert("America/New_York")
+        # Demo/db_error rows carry tz-naive local timestamps — tz_convert on
+        # those raises and would crash the whole app right when the DB is down.
+        ts = pd.Timestamp(r["commence_time"])
+        when = ts.tz_convert("America/New_York") if ts.tzinfo else ts
         graded_rows.append({
             "correct": correct, "league": LEAGUE_LABEL.get(str(r["sport"]), str(r["sport"]).upper()),
             "match": f"{away} @ {home}", "score": f"{int(as_)}–{int(hs)}",

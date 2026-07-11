@@ -45,8 +45,14 @@ def latest_market(conn, event_id: str, market: str = "h2h") -> dict[str, dict]:
         select distinct on (bookmaker, outcome) bookmaker, outcome, price_decimal
         from odds_snapshots
         where event_id = %s and market = %s
+          -- drop books that stopped quoting: a delisted book's frozen price
+          -- stays "freshest" for that book forever, and because the market
+          -- moved away from it, it wins best-price selection and inflates EV
+          and captured_at >= (
+            select max(captured_at) - interval '2 hours'
+            from odds_snapshots where event_id = %s and market = %s)
         order by bookmaker, outcome, captured_at desc
-    """, (event_id, market))
+    """, (event_id, market, event_id, market))
     by_outcome: dict[str, dict] = {}
     for s in snaps:
         o = by_outcome.setdefault(s["outcome"], {"best_decimal": 0, "best_book": None, "decimals": []})
@@ -65,8 +71,10 @@ def moneyline_candidates(conn, sport: str, bankroll: float) -> list[dict]:
     for _, p in preds.iterrows():
         game = query(conn, "select home_team_id, away_team_id from games where event_id=%s",
                      (p["event_id"],))[0]
-        home = game["home_team_id"].split("_", 1)[1]
-        away = game["away_team_id"].split("_", 1)[1]
+        # strip the exact sport prefix — split("_", 1) breaks on sports whose
+        # key contains underscores (soccer_epl_Arsenal -> "epl_Arsenal")
+        home = game["home_team_id"][len(sport) + 1:]
+        away = game["away_team_id"][len(sport) + 1:]
         market = latest_market(conn, p["event_id"])
         for outcome, true_p in ((home, p["model_prob"]), (away, 1 - p["model_prob"])):
             m = market.get(outcome)
@@ -108,9 +116,12 @@ def poisson_candidates(conn, sport: str, bankroll: float) -> list[dict]:
                                         am[keys[0]], am[keys[1]], league_avg)
         probs = match_probs(lam_h, lam_a)
         market = latest_market(conn, g["event_id"])
+        # strip the exact sport prefix: split("_", 1) yields "epl_Arsenal" for
+        # soccer sports, which never matches odds outcomes — every home/away
+        # soccer bet would be silently skipped, leaving Draw-only pricing
         name_map = {
-            g["home_team_id"].split("_", 1)[1]: probs["home"],
-            g["away_team_id"].split("_", 1)[1]: probs["away"],
+            g["home_team_id"][len(sport) + 1:]: probs["home"],
+            g["away_team_id"][len(sport) + 1:]: probs["away"],
             "Draw": probs["draw"],
         }
         all_decs = [m["best_decimal"] for m in market.values()]

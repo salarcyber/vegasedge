@@ -149,7 +149,9 @@ def build_dossier(conn, pred: dict) -> dict:
 
     market_prob = round(1 / pred["best_decimal"], 4) if pred["best_decimal"] else None
     return {
-        "matchup": f"{game['away_team_id'].split('_',1)[1]} @ {game['home_team_id'].split('_',1)[1]}",
+        # rsplit: sport keys contain underscores (soccer_epl_Arsenal), team
+        # display names never do — split('_',1) would leave "epl_Arsenal"
+        "matchup": f"{game['away_team_id'].rsplit('_', 1)[-1]} @ {game['home_team_id'].rsplit('_', 1)[-1]}",
         "commence_time": str(game["commence_time"]),
         "pick": {
             "outcome": pred["outcome"], "market": pred["market"],

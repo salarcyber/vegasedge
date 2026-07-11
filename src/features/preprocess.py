@@ -153,11 +153,12 @@ def _opening_market_prob(conn, event_id: str, home_team_id: str) -> float | None
         """, (event_id,))
     if len(snaps) < 2:
         return None
-    home_name = home_team_id.split("_", 1)[-1]
     decs = [s["price_decimal"] for s in snaps]
     probs = devig_multiplicative(decs)
     for s, p in zip(snaps, probs):
-        if s["outcome"] == home_name:
+        # suffix match instead of split("_", 1): sport keys contain underscores
+        # (soccer_epl_Arsenal), so a prefix split never matches soccer outcomes
+        if home_team_id.endswith("_" + s["outcome"]):
             return round(p, 4)
     return None
 
